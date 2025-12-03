@@ -6,6 +6,7 @@ BASE_DIR="$(cd "$SELF_DIR/.." && pwd)"
 SERVERS_DIR="${SERVERS_DIR:-$BASE_DIR/servers}"
 
 PY_FILE="$SELF_DIR/plugin_web.py"
+PY_FILE="$SELF_DIR/plugin_web.py"
 
 GREEN='\033[0;32m'; YELLOW='\033[1;33m'; RED='\033[0;31m'; NC='\033[0m'
 color() { printf "%b%s%b\n" "$1" "$2" "$NC"; }
