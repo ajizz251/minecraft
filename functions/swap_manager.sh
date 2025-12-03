@@ -17,6 +17,12 @@ function getSwapStatus() {
 function createSwap() {
     local size=$1
 
+    # Cek apakah user punya akses sudo
+    if ! sudo -n true 2>/dev/null; then
+        echo -e "${YELLOW}Fitur ini membutuhkan akses sudo/root.${NC}"
+        sudo -v || return
+    fi
+
     # Cek apakah swap sudah ada, jika ya, nonaktifkan dan hapus dulu
     if [ -f /swapfile ]; then
         echo -e "${YELLOW}Swap file sudah ada. Menonaktifkan dan menghapus yang lama...${NC}"
@@ -27,8 +33,9 @@ function createSwap() {
     fi
 
     echo -e "\n${YELLOW}Membuat swap file baru sebesar ${size}B...${NC}"
-    sudo fallocate -l "${size}G" /swapfile
-    if [ $? -ne 0 ]; then
+    
+    # Gunakan sudo untuk fallocate
+    if ! sudo fallocate -l "${size}G" /swapfile; then
         echo -e "${RED}Gagal membuat file dengan fallocate. Mencoba dengan dd (lebih lambat)...${NC}"
         sudo dd if=/dev/zero of=/swapfile bs=1G count="$size"
     fi
@@ -37,8 +44,8 @@ function createSwap() {
     sudo mkswap /swapfile
     sudo swapon /swapfile
 
-    # Tambahkan ke /etc/fstab agar aktif otomatis saat reboot
-    echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
+    # Tambahkan ke /etc/fstab agar aktif otomatis saat reboot (perlu trik untuk redirect sudo)
+    echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab > /dev/null
 
     echo -e "\n${GREEN}✅ Swap file sebesar ${size}GB berhasil dibuat dan diaktifkan.${NC}"
     read -p "Tekan [Enter] untuk kembali."
@@ -51,6 +58,9 @@ function toggleSwap() {
         sleep 3
         return
     fi
+    
+    # Cek sudo
+    sudo -v || return
 
     if swapon --show | grep -q '/swapfile'; then
         echo -e "${YELLOW}Menonaktifkan swap...${NC}"
@@ -74,6 +84,7 @@ function swapMenu() {
         fi
 
         echo -e "${BLUE}--- Manajemen RAM Swap ---${NC}"
+        echo -e "${YELLOW}Catatan: Fitur ini memerlukan akses sudo (password user).${NC}"
         echo -e "Status Swap     : $(getSwapStatus)"
         echo -e "Ukuran Saat Ini : ${YELLOW}$current_swap_size${NC}"
         echo -e "${BLUE}------------------------------------${NC}"
@@ -103,6 +114,7 @@ function swapMenu() {
                     echo -e "${RED}PERINGATAN: Ini akan menghapus swap file secara permanen.${NC}"
                     read -p "Apakah Anda yakin? (y/n): " confirm
                     if [[ "$confirm" == "y" ]]; then
+                        sudo -v || break
                         sudo swapoff /swapfile
                         sudo rm /swapfile
                         sudo sed -i '/\/swapfile/d' /etc/fstab
