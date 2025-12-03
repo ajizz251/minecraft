@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 
-SERVERS_DIR="${SERVERS_DIR:-/root/mc-panel/servers}"
+# Deteksi path dinamis
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BASE_DIR="$(cd "$SELF_DIR/.." && pwd)"
+SERVERS_DIR="${SERVERS_DIR:-$BASE_DIR/servers}"
+
 PY_FILE="$SELF_DIR/plugin_web.py"
 
 GREEN='\033[0;32m'; YELLOW='\033[1;33m'; RED='\033[0;31m'; NC='\033[0m'
@@ -28,9 +31,16 @@ pick_port() {
 
 ensure_python() {
   if need python3; then return 0; fi
+  # Coba install dengan sudo jika non-root
   if need apt-get; then
-    apt-get update -y >/dev/null 2>&1 || true
-    apt-get install -y python3 >/dev/null 2>&1 || true
+    echo "Menginstal python3..."
+    if [ "$EUID" -ne 0 ]; then
+         sudo apt-get update -y >/dev/null 2>&1 || true
+         sudo apt-get install -y python3 >/dev/null 2>&1 || true
+    else
+         apt-get update -y >/dev/null 2>&1 || true
+         apt-get install -y python3 >/dev/null 2>&1 || true
+    fi
   fi
   need python3 || { color "$RED" "python3 tidak tersedia"; exit 1; }
 }
@@ -42,8 +52,21 @@ ensure_pyfile() {
 ufw_open() {
   local port="$1"
   if need ufw; then
-    local status; status="$(ufw status 2>/dev/null | head -n1 || true)"
-    ufw allow "$port"/tcp >/dev/null 2>&1 || true
+    # Cek akses sudo untuk ufw
+    if [ "$EUID" -ne 0 ] && ! sudo -n true 2>/dev/null; then
+         color "$YELLOW" "Tidak dapat mengatur UFW otomatis (butuh sudo). Pastikan port $port dibuka manual."
+         return
+    fi
+
+    local status;
+    if [ "$EUID" -ne 0 ]; then
+         status="$(sudo ufw status 2>/dev/null | head -n1 || true)"
+         sudo ufw allow "$port"/tcp >/dev/null 2>&1 || true
+    else
+         status="$(ufw status 2>/dev/null | head -n1 || true)"
+         ufw allow "$port"/tcp >/dev/null 2>&1 || true
+    fi
+
     if echo "$status" | grep -qi "inactive"; then
       color "$YELLOW" "ufw belum aktif; rule ditambahkan (ufw tidak diaktifkan otomatis)."
     else
