@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 
+# Deteksi path dinamis
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BASE_DIR="$(cd "$SELF_DIR/.." && pwd)"
+SERVERS_DIR="${SERVERS_DIR:-$BASE_DIR/servers}"
+
 # Definisi warna untuk tampilan
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m';
 BLUE='\033[0;34m'; MAG='\033[0;35m'; CYAN='\033[0;36m'; NC='\033[0m'
-
-# Direktori server untuk identifikasi proses (opsional, bisa disesuaikan)
-SERVERS_DIR="${SERVERS_DIR:-/root/mc-panel/servers}"
 
 # Fungsi utama untuk menampilkan menu port
 portsMenu() {
@@ -25,7 +27,8 @@ portsMenu() {
     echo -e "${BLUE}╠═════════╪═══════════╪════════════════════════════╪═════════════════════╣${NC}"
 
     # --- Mengumpulkan dan Menampilkan Data ---
-    # Menggunakan 'ss' untuk mengambil data TCP dan UDP yang listening, lalu 'awk' untuk memformatnya
+    # Note: ss tanpa sudo mungkin tidak menampilkan nama proses milik user lain.
+    # Kita tambahkan 2>/dev/null untuk menyembunyikan error jika ada.
     ss -lntup 2>/dev/null | awk '
         NR > 1 {
             # Ekstrak informasi port dan proses
@@ -47,6 +50,7 @@ portsMenu() {
 
     # --- Footer Tampilan ---
     echo -e "${BLUE}╚═════════╧═══════════╧════════════════════════════╧═════════════════════╝${NC}"
+    echo -e "${YELLOW}Catatan: Jika nama proses kosong (-), mungkin itu proses sistem atau butuh sudo.${NC}"
     echo
     read -p "Tekan [Enter] untuk kembali ke menu utama..."
 }
