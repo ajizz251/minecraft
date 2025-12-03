@@ -1,5 +1,11 @@
+#!/usr/bin/env bash
 set -euo pipefail
-BASE_DIR="${BASE_DIR:-/root/mc-panel}"
+
+# --- Deteksi Path Dinamis ---
+# Mengambil lokasi script ini, lalu naik satu level ke folder utama panel
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BASE_DIR="$(cd "$SELF_DIR/.." && pwd)"
+
 SERVERS_DIR="${SERVERS_DIR:-$BASE_DIR/servers}"
 EGGS_DIR="${EGGS_DIR:-$BASE_DIR/eggs}"
 
@@ -40,6 +46,7 @@ need_cmd(){ command -v "$1" >/dev/null 2>&1; }
 pause(){ read -rp $'\nTekan [Enter] untuk lanjut...'; }
 port_in_use_tcp() { ss -ltn 2>/dev/null | awk '{print $4}' | grep -q ":${1}$"; }
 port_in_use_udp() { ss -lun 2>/dev/null | awk '{print $5}' | grep -q ":${1}$"; }
+
 prompt_port_loop() {
   local prompt="$1" def="$2" mode="${3:-tcp}" port
   while true; do
@@ -48,6 +55,11 @@ prompt_port_loop() {
     if ! [[ "$port" =~ ^[0-9]+$ ]] || (( port < 1 || port > 65535 )); then
       echo -e "${RED}Port tidak valid. Masukkan angka 1..65535.${NC}"; continue
     fi
+    # Cek port reserved untuk non-root
+    if (( port < 1024 )) && [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
+         echo -e "${YELLOW}Peringatan: Port di bawah 1024 mungkin membutuhkan akses root.${NC}"
+    fi
+
     local used=0
     case "$mode" in
       udp) port_in_use_udp "$port" && used=1 ;;
@@ -57,6 +69,7 @@ prompt_port_loop() {
     echo "$port"; return 0
   done
 }
+
 write_java_port() {
   local prop_file="$1" port="$2"
   if [ ! -f "$prop_file" ]; then
@@ -111,10 +124,22 @@ prompt_seed_menu() {
 createServer() {
   clear
   echo -e "${BLUE}--- Membuat Server Baru dari Egg ---${NC}"
+  
+  # Cek dan install jq jika perlu (dengan sudo jika non-root)
   if ! need_cmd jq; then
-    echo -e "${RED}jq tidak ditemukan. Install: apt-get install -y jq${NC}"
-    pause; return
+    echo -e "${YELLOW}jq tidak ditemukan. Mencoba menginstal...${NC}"
+    if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
+        if sudo apt-get update && sudo apt-get install -y jq; then
+            echo -e "${GREEN}jq berhasil diinstal.${NC}"
+        else
+            echo -e "${RED}Gagal menginstal jq via sudo. Silakan install manual: sudo apt install jq${NC}"
+            pause; return
+        fi
+    else
+        apt-get update && apt-get install -y jq
+    fi
   fi
+
   mapfile -t eggs < <(find "$EGGS_DIR" -type f -name "*.json" | sort)
   if [ ${#eggs[@]} -eq 0 ]; then
     echo -e "${RED}Tidak ada file egg (.json) ditemukan di ${EGGS_DIR}.${NC}"
@@ -198,7 +223,9 @@ createServer() {
     pause; return
   fi
   install_script_clean=$(echo "$install_script_raw" | sed 's/\r$//' | sed 's/\\"/"/g')
-  local temp_install_script="/tmp/install_${server_name}.sh"
+  
+  # Gunakan /tmp agar aman dan user-writable
+  local temp_install_script="/tmp/install_${server_name}_$$.sh"
   {
     echo "#!/usr/bin/env bash"
     case "$server_memory" in
@@ -265,11 +292,19 @@ createServer() {
     fi
   fi
 
+  # Membuat start.sh
   cat > "start.sh" <<SH
 #!/usr/bin/env bash
 cd "\$(dirname "\$0")"
 RAM_ALLOC=\$(cat memory.conf)
-JAVA_BIN="\${JAVA_BIN:-java}"
+# Deteksi Java otomatis dari PATH atau fallback
+if command -v java >/dev/null 2>&1; then
+    JAVA_BIN="java"
+else
+    # Fallback ke lokasi standar installasi setup.sh jika tidak di PATH
+    JAVA_BIN="/usr/local/bin/java"
+fi
+
 XMS="\$RAM_ALLOC"
 XMX="\$RAM_ALLOC"
 echo "==> Menjalankan server: $jar_file (Java: \$JAVA_BIN, Xms=\$XMS, Xmx=\$XMX)"
@@ -285,13 +320,17 @@ exec "\$JAVA_BIN" -Xms"\$XMS" -Xmx"\$XMX" -XX:+UseG1GC -XX:+ParallelRefProcEnabl
 SH
   chmod +x "start.sh"
   echo "eula=true" > "eula.txt"
+  
+  # Kembali ke base dir
   cd "$BASE_DIR"
+  
   echo -e "\n${GREEN}✅   Instalasi server '$server_name' berdasarkan egg '$egg_name' selesai!${NC}"
   local seed_display="${WORLD_SEED:-Random}"
   echo -e "${YELLOW}Catatan:${NC} Port: ${SERVER_PORT}, Seed: ${seed_display}. start.sh memakai Java 21 flags. Xms/Xmx = ${server_memory}. EULA sudah disetujui."
   echo -e "${BLUE}Log detail tersimpan di ${server_path}/install.log${NC}"
   pause
 }
+
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
   createServer
 fi
