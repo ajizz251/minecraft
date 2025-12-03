@@ -1,4 +1,4 @@
-# 🛠️Minecraft Panel
+# 🛠️Minecraft Panel (No root version)
 
 Panel sederhana berbasis **Bash** untuk mengelola server Minecraft di VPS/Linux. dengan integrasi **Java 21, tmux, vnstat, gotop**, dan otomatisasi penuh.
 
