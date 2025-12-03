@@ -1,10 +1,15 @@
 #!/usr/bin/env bash
 
-# --- Deteksi Path Dinamis (Aman untuk Non-Root) ---
+# ==============================================================================
+#   SERVER MANAGER (Non-Root Compatible)
+# ==============================================================================
+
+# --- Deteksi Path Dinamis ---
+# Mengambil lokasi script ini (functions/), lalu naik satu level ke folder utama
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BASE_DIR="$(cd "$SELF_DIR/.." && pwd)"
 
-# Gunakan variabel lingkungan jika ada, jika tidak gunakan path relatif
+# Gunakan variabel lingkungan jika ada, jika tidak gunakan path relatif dari BASE_DIR
 SERVERS_DIR="${SERVERS_DIR:-$BASE_DIR/servers}"
 FUNCTIONS_DIR="${FUNCTIONS_DIR:-$BASE_DIR/functions}"
 
@@ -182,7 +187,7 @@ configEditorMenu(){
       if need_cmd mc; then
           mc "$server_path"
       else
-          echo -e "${RED}'mc' (Midnight Commander) belum terinstall.${NC}"
+          echo -e "${RED}'mc' (Midnight Commander) belum terinstall. Install dengan: sudo apt install mc${NC}"
           pause
       fi
     elif [[ "$pick" =~ ^[0-9]+$ ]] && [ -n "${files[$pick]:-}" ]; then
@@ -227,7 +232,7 @@ cronAddDailyRestart(){
   # Hapus entry lama jika ada
   crontab -l 2>/dev/null | sed "/${tag}/d" > "$tmp"
   
-  # Tambahkan entry baru. Path script sudah absolut dari fungsi ensureRestartScript
+  # Tambahkan entry baru
   echo "$m $h * * * /bin/bash '$script' >> '$server_path/logs/auto-restart.log' 2>&1 ${tag}" >> "$tmp"
   
   crontab "$tmp"
@@ -326,9 +331,6 @@ pluginWebMenu(){
   done
 }
 
-# (Bagian JVM Template diringkas agar sesuai batas karakter, fungsinya sama tapi menggunakan BASE_DIR)
-# Pastikan fungsi installAndApplyGraalVM dll menggunakan $BASE_DIR untuk download Java.
-
 downloadPluginFromLink(){
     local server_name="$1"
     local server_path="$SERVERS_DIR/$server_name"
@@ -342,14 +344,460 @@ downloadPluginFromLink(){
     if [ -z "$url" ]; then echo "Dibatalkan."; sleep 1; return; fi
     
     echo "Sedang mengunduh..."
+    # Pindah ke direktori plugins sementara untuk wget
+    local cwd
+    cwd=$(pwd)
     cd "$plugins_dir" || return
+    
     if wget --content-disposition "$url"; then
         echo -e "${GREEN}Berhasil diunduh ke folder plugins.${NC}"
     else
         echo -e "${RED}Gagal mengunduh.${NC}"
     fi
-    cd "$BASE_DIR" || return
+    
+    cd "$cwd" || return
     pause
+}
+
+# --- Fungsi Lanjutan (GraalVM, dll) ---
+# Menggunakan run_with_spinner dan path dinamis BASE_DIR
+
+run_with_spinner() {
+    local desc="$1"
+    shift
+    local cmd=("$@")
+    local spin_chars='-\|/'
+    local i=0
+    local pid=""
+    local exit_code=0
+
+    cleanup() {
+        printf "\r%s\n" "$(tput el)"
+        tput cnorm
+    }
+    trap cleanup EXIT
+
+    tput civis
+    printf "%s... " "$desc"
+
+    "${cmd[@]}" > /dev/null 2>&1 &
+    pid=$!
+
+    while kill -0 "$pid" 2>/dev/null; do
+        i=$(( (i+1) % 4 ))
+        printf "\r%s... %c" "$desc" "${spin_chars:$i:1}"
+        sleep 0.1
+    done
+
+    wait "$pid"
+    exit_code=$?
+
+    printf "\r%s... " "$desc"
+    if [ "$exit_code" -eq 0 ]; then
+        printf "\033[32mSELESAI\033[0m\n"
+    else
+        printf "\033[31mGAGAL (Kode Keluar: %d)\033[0m\n" "$exit_code"
+    fi
+
+    tput cnorm
+    trap - EXIT
+    return "$exit_code"
+}
+
+changeJvmTemplate(){
+  local server_name="$1"
+  local server_path="$SERVERS_DIR/$server_name"
+  local start_script_path="$server_path/start.sh"
+  local graalvm_path="$BASE_DIR/graalvm-community-openjdk-21.0.1+12.1"
+  local graalvm_native_executable="$server_name-native"
+  local current_java_home=""
+  local graalvm_status=""
+  local graalvm_native_status=""
+  local temurin_hilltty_status=""
+
+  if [ -f "$start_script_path" ]; then
+    current_java_home=$(grep -oP '^export JAVA_HOME="\K[^"]+' "$start_script_path" | head -n1)
+    if [[ "$current_java_home" == "$graalvm_path" ]]; then
+      if grep -q "java -Xms" "$start_script_path"; then
+        graalvm_status=" ${GREEN}🟢${NC}"
+      elif grep -q "./$graalvm_native_executable" "$start_script_path"; then
+        graalvm_native_status=" ${GREEN}🟢${NC}"
+      fi
+    elif grep -q "^./$graalvm_native_executable" "$start_script_path" && ! grep -q "java -Xms" "$start_script_path"; then
+        graalvm_native_status=" ${GREEN}🟢${NC}"
+    else
+      if grep -q "-XX:-OmitStackTraceInFastThrow" "$start_script_path" && grep -q "-Dfml.queryResult=confirm" "$start_script_path"; then
+        temurin_hilltty_status=" ${GREEN}🟢${NC}"
+      fi
+    fi
+  fi
+
+  while true; do
+    clear
+    echo -e "${BLUE}--- Ganti JVM Template untuk ${YELLOW}$server_name${BLUE} ---${NC}"
+    echo "Pilih template JVM untuk diterapkan."
+    echo ""
+    echo -e " 1) GraalVM Community Edition (G1GC)$graalvm_status"
+    echo -e " 2) GraalVM Native Image (Experimental - Untuk Expert)$graalvm_native_status"
+    echo -e " 3) Adoptium (Eclipse Temurin) + Hilltty Flags$temurin_hilltty_status"
+    echo " 0) Kembali"
+    read -rp "Pilih: " choice
+    case "$choice" in
+      1) installAndApplyGraalVM "$server_name";;
+      2) installAndApplyGraalVMNative "$server_name";;
+      3) applyTemurinHillttyFlags "$server_name";;
+      0) return ;;
+      *) echo -e "${RED}Pilihan tidak valid.${NC}"; sleep 1 ;;
+    esac
+  done
+}
+
+installAndApplyGraalVMNative(){
+  local server_name="$1"
+  local server_path="$SERVERS_DIR/$server_name"
+  local start_script_path="$server_path/start.sh"
+  local graalvm_path="$BASE_DIR/graalvm-community-openjdk-21.0.1+12.1"
+  local native_executable_name="$server_name-native"
+  local native_executable_path="$server_path/$native_executable_name"
+
+  clear
+  echo -e "${BLUE}--- Template GraalVM Native Image untuk ${YELLOW}$server_name${BLUE} ---${NC}"
+  echo -e "${YELLOW}⚠️ Peringatan: Fitur ini masih eksperimental dan belum semua plugin kompatibel.${NC}"
+  echo -e "${YELLOW}   Proses build Native Image akan memakan waktu cukup lama (~10-30 menit).${NC}"
+  pause
+
+  if [ ! -d "$graalvm_path" ]; then
+    echo -e "${RED}GraalVM JDK tidak ditemukan. Harap instal GraalVM Community Edition terlebih dahulu.${NC}"
+    pause
+    return
+  fi
+
+  local OLD_JAVA_HOME="${JAVA_HOME:-}"
+  local OLD_PATH="$PATH"
+  export JAVA_HOME="$graalvm_path"
+  export PATH="$JAVA_HOME/bin:$PATH"
+
+  if ! run_with_spinner "Menginstal komponen Native Image" gu install native-image; then
+    echo -e "${RED}Gagal menginstal komponen Native Image.${NC}"
+    export JAVA_HOME="$OLD_JAVA_HOME"
+    export PATH="$OLD_PATH"
+    pause
+    return
+  fi
+
+  local current_jar
+  current_jar=$(grep -oP -- '-jar \K\S+\.jar' "$start_script_path" | head -n1)
+  if [[ -z "$current_jar" ]]; then
+    echo -e "${RED}Tidak dapat menemukan nama JAR server di start.sh.${NC}"
+    export JAVA_HOME="$OLD_JAVA_HOME"
+    export PATH="$OLD_PATH"
+    pause
+    return
+  fi
+
+  echo ""
+  if ! run_with_spinner "Membangun Native Image ($current_jar -> $native_executable_name)" \
+     native-image \
+     --no-fallback \
+     -H:+UnlockExperimentalVMOptions \
+     -H:+ReportExceptionStackTraces \
+     -jar "$server_path/$current_jar" \
+     "$native_executable_path"; then
+    echo -e "${RED}Gagal membangun Native Image.${NC}"
+    export JAVA_HOME="$OLD_JAVA_HOME"
+    export PATH="$OLD_PATH"
+    pause
+    return
+  fi
+
+  local new_content
+  read -r -d '' new_content << EOM
+#!/usr/bin/env bash
+# GraalVM Native Image Flags
+# Source: https://www.graalvm.org/latest/reference-manual/native-image/
+# Warning: Experimental, not all plugins compatible.
+
+# JAVA_HOME is not strictly needed for native binary, but kept for consistency if other tools rely on it
+export JAVA_HOME="$graalvm_path"
+export PATH="\$JAVA_HOME/bin:\$PATH"
+
+cd "$(dirname "$0")"
+./$native_executable_name
+EOM
+
+  echo "$new_content" > "$start_script_path"
+  chmod +x "$start_script_path"
+
+  echo -e "${GREEN}Native Image berhasil dibangun dan diterapkan ke start.sh.${NC}"
+  
+  export JAVA_HOME="$OLD_JAVA_HOME"
+  export PATH="$OLD_PATH"
+  pause
+}
+
+applyTemurinHillttyFlags(){
+  local server_name="$1"
+  local server_path="$SERVERS_DIR/$server_name"
+  local start_script_path="$server_path/start.sh"
+  local memory_conf_path="$server_path/memory.conf"
+
+  clear
+  echo -e "${BLUE}--- Template Adoptium (Eclipse Temurin) + Hilltty Flags untuk ${YELLOW}$server_name${BLUE} ---${NC}"
+  echo -e "${YELLOW}Catatan: Template ini mengasumsikan Anda memiliki OpenJDK (seperti Adoptium Temurin) yang terinstal dan dapat diakses melalui perintah 'java' di PATH Anda.${NC}"
+  pause
+
+  if [ ! -f "$memory_conf_path" ]; then
+    echo -e "${RED}File memory.conf tidak ditemukan!${NC}"
+    echo "File ini seharusnya dibuat saat server dibuat."
+    echo "Anda bisa membuatnya manual: echo '2G' > $memory_conf_path"
+    pause
+    return
+  fi
+
+  local RAM_ALLOC=$(cat "$memory_conf_path")
+  local jar_value
+  jar_value=$(grep -oP -- '-jar \K\S+\.jar' "$start_script_path" | head -n1)
+  if [[ -z "$jar_value" ]]; then
+    jar_value="server.jar"
+  fi
+  local current_jar="$jar_value"
+
+  if run_with_spinner "Menerapkan Hilltty Flags" true; then
+    local new_content
+    read -r -d '' new_content << EOM
+#!/usr/bin/env bash
+# Hilltty's Optimized Flags for Modded Servers
+# Source: Reddit r/feedthebeast community
+
+# Read RAM allocation from the dedicated config file
+RAM_ALLOC=\$(cat memory.conf)
+
+# JAVA_HOME is not explicitly set, assumes system default 'java' command
+# export JAVA_HOME="/path/to/adoptium-temurin-jdk" # Uncomment and modify if specific JDK path is needed
+# export PATH="\$JAVA_HOME/bin:\$PATH"
+
+java -Xms\$RAM_ALLOC -Xmx\$RAM_ALLOC \\
+-XX:+UseG1GC \\
+-XX:+ParallelRefProcEnabled \\
+-XX:MaxGCPauseMillis=200 \\
+-XX:+UnlockExperimentalVMOptions \\
+-XX:+DisableExplicitGC \\
+-XX:-OmitStackTraceInFastThrow \\
+-XX:+AlwaysPreTouch \\
+-XX:G1NewSizePercent=30 \\
+-XX:G1MaxNewSizePercent=40 \\
+-XX:G1HeapRegionSize=8M \\
+-XX:G1ReservePercent=20 \\
+-XX:G1HeapWastePercent=5 \\
+-XX:G1MixedGCCountTarget=4 \\
+-XX:InitiatingHeapOccupancyPercent=15 \\
+-XX:G1MixedGCLiveThresholdPercent=90 \\
+-XX:G1RSetUpdatingPauseTimePercent=5 \\
+-XX:SurvivorRatio=32 \\
+-XX:+PerfDisableSharedMem \\
+-XX:MaxTenuringThreshold=1 \\
+-Dusing.aikars.flags=https://mcflags.emc.gs \\
+-Daikars.new.flags=true \\
+-Dfml.queryResult=confirm \\
+-jar ${current_jar} nogui
+EOM
+
+    echo "$new_content" > "$start_script_path"
+    chmod +x "$start_script_path"
+    echo -e "${GREEN}Template Adoptium (Eclipse Temurin) + Hilltty Flags berhasil diterapkan.${NC}"
+  else
+    echo -e "${RED}Gagal menerapkan template Adoptium (Eclipse Temurin) + Hilltty Flags.${NC}"
+  fi
+  
+  pause
+}
+
+installAndApplyGraalVM(){
+  local server_name="$1"
+  local graalvm_dir="$BASE_DIR/graalvm-community-openjdk-21.0.1+12.1"
+  local graalvm_archive="$BASE_DIR/graalvm-community-jdk-21.0.1_linux-x64_bin.tar.gz"
+  local graalvm_url="https://github.com/graalvm/graalvm-ce-builds/releases/download/jdk-21.0.1/graalvm-community-jdk-21.0.1_linux-x64_bin.tar.gz"
+
+  clear
+  echo -e "${BLUE}--- Template GraalVM untuk ${YELLOW}$server_name${BLUE} ---${NC}"
+
+  if [ -d "$graalvm_dir" ]; then
+    echo -e "${GREEN}GraalVM Installed${NC}"
+  else
+    echo -e "${YELLOW}Direktori GraalVM tidak ditemukan. Memulai download...${NC}"
+    echo "URL: $graalvm_url"
+    
+    if ! curl -# -L -o "$graalvm_archive" "$graalvm_url"; then
+      echo -e "${RED}Download gagal! Silakan periksa koneksi Anda atau URL.${NC}"
+      rm -f "$graalvm_archive"
+      pause
+      return
+    fi
+    
+    echo ""
+
+    if ! run_with_spinner "Mengekstrak arsip" tar -xzf "$graalvm_archive" -C "$BASE_DIR"; then
+        echo -e "${RED}Ekstraksi gagal! Arsip mungkin rusak.${NC}"
+        rm -f "$graalvm_archive"
+        pause
+        return
+    fi
+    
+    rm -f "$graalvm_archive"
+  fi
+
+  if run_with_spinner "Menerapkan flag JVM" applyGraalVMFlags "$server_name" "$graalvm_dir"; then
+    echo -e "${GREEN}Template JVM berhasil diterapkan.${NC}"
+  else
+    echo -e "${RED}Gagal menerapkan template JVM.${NC}"
+  fi
+  
+  pause
+}
+
+applyGraalVMFlags(){
+  local server_name="$1"
+  local graalvm_path="$2"
+  local server_path="$SERVERS_DIR/$server_name"
+  local start_script_path="$server_path/start.sh"
+  local memory_conf_path="$server_path/memory.conf"
+
+  if [ ! -f "$memory_conf_path" ]; then
+    echo "2G" > "$memory_conf_path"
+  fi
+
+  local jar_value
+  jar_value=$(grep -oP -- '-jar \K\S+\.jar' "$start_script_path" | head -n1)
+  if [[ -z "$jar_value" ]]; then
+    jar_value="server.jar"
+  fi
+  local current_jar="$jar_value"
+
+  local new_content
+  read -r -d '' new_content << EOM
+#!/usr/bin/env bash
+# GraalVM G1GC Flags - Tested by Obydux & Community
+# Source: https://github.com/Obydux/Minecraft-GraalVM-Flags
+
+# Read RAM allocation from the dedicated config file
+RAM_ALLOC=\$(cat memory.conf)
+
+export JAVA_HOME="$graalvm_path"
+export PATH="\$JAVA_HOME/bin:\$PATH"
+
+java -Xms\$RAM_ALLOC -Xmx\$RAM_ALLOC \\
+-XX:+UseG1GC \\
+-XX:+ParallelRefProcEnabled \\
+-XX:MaxGCPauseMillis=200 \\
+-XX:+UnlockExperimentalVMOptions \\
+-XX:+UnlockDiagnosticVMOptions \\
+-XX:+DisableExplicitGC \\
+-XX:+AlwaysPreTouch \\
+-XX:G1NewSizePercent=30 \\
+-XX:G1MaxNewSizePercent=40 \\
+-XX:G1HeapRegionSize=8M \\
+-XX:G1ReservePercent=20 \\
+-XX:G1HeapWastePercent=5 \\
+-XX:G1MixedGCCountTarget=4 \\
+-XX:InitiatingHeapOccupancyPercent=15 \\
+-XX:G1MixedGCLiveThresholdPercent=90 \\
+-XX:G1RSetUpdatingPauseTimePercent=5 \\
+-XX:SurvivorRatio=32 \\
+-XX:+PerfDisableSharedMem \\
+-XX:MaxTenuringThreshold=1 \\
+-XX:G1SATBBufferEnqueueingThresholdPercent=30 \\
+-XX:G1ConcMarkStepDurationMillis=5 \\
+-XX:G1ConcRSHotCardLimit=16 \\
+-XX:G1RSetUpdatingPauseTimePercent=5 \\
+-XX:GCTimeRatio=99 \\
+-jar ${current_jar} nogui
+EOM
+
+  echo "$new_content" > "$start_script_path"
+  chmod +x "$start_script_path"
+}
+
+customJvmEditor(){
+  local server_name="$1" server_path="$SERVERS_DIR/$server_name" start_script_path="$server_path/start.sh"
+  [ -f "$start_script_path" ] || { echo -e "${RED}File start.sh tidak ditemukan!${NC}"; sleep 2; return; }
+  clear
+  echo -e "${BLUE}--- Editor JVM Kustom untuk ${YELLOW}$server_name${BLUE} ---${NC}"
+  echo "Anda akan membuka file start.sh."
+  echo "Anda dapat mengedit argumen Java (flags) secara manual."
+  echo "Contoh: -Xmx4G -Xms4G -XX:+UseG1GC ..."
+  pause
+  "$EDITOR_BIN" "$start_script_path"
+  echo -e "${GREEN}File start.sh telah disimpan.${NC}"
+  sleep 1
+}
+
+systemConfigurationMenu(){
+  local server_name="$1" choice
+  while true; do
+    clear
+    echo -e "${BLUE}--- System Configuration: ${YELLOW}${server_name}${BLUE} ---${NC}"
+    echo " 1) Ram Allocation"
+    echo " 2) Ganti JVM Template"
+    echo " 3) Custom JVM"
+    echo " 0) Kembali"
+    read -rp "Pilih: " choice
+    case "$choice" in
+      1) ramAllocationMenu "$server_name" ;;
+      2) changeJvmTemplate "$server_name" ;;
+      3) customJvmEditor "$server_name" ;;
+      0) return ;;
+      *) echo -e "${RED}Pilihan tidak valid.${NC}"; sleep 1 ;;
+    esac
+  done
+}
+
+whitelistMenu(){
+  local server_name="$1"
+  local server_path="$SERVERS_DIR/$server_name"
+  local choice target
+
+  while true; do
+    clear
+    echo -e "${BLUE}--- Manajemen Whitelist: ${YELLOW}${server_name}${BLUE} ---${NC}"
+    
+    local whitelist_status="Tidak diketahui"
+    if [ -f "$server_path/server.properties" ]; then
+      if grep -q "white-list=true" "$server_path/server.properties"; then
+        whitelist_status="${GREEN}AKTIF${NC}"
+      elif grep -q "white-list=false" "$server_path/server.properties"; then
+        whitelist_status="${RED}NON-AKTIF${NC}"
+      fi
+    fi
+    echo -e "Status saat ini (dari server.properties): $whitelist_status"
+    
+    echo ""
+    echo " 1) Aktifkan Whitelist"
+    echo " 2) Non-aktifkan Whitelist"
+    echo " 3) Tampilkan Daftar Pemain di Whitelist"
+    echo " 4) Tambah Pemain ke Whitelist"
+    echo " 5) Hapus Pemain dari Whitelist"
+    echo " 6) Reload Whitelist"
+    echo " 0) Kembali"
+    read -rp "Pilih: " choice
+    case "$choice" in
+      1) consoleCmd "$server_name" "whitelist on" && echo -e "${GREEN}Perintah untuk mengaktifkan whitelist telah dikirim.${NC}"; pause ;;
+      2) consoleCmd "$server_name" "whitelist off" && echo -e "${GREEN}Perintah untuk menon-aktifkan whitelist telah dikirim.${NC}"; pause ;;
+      3) 
+         consoleCmd "$server_name" "whitelist list" >/dev/null
+         sleep 1
+         echo "Pemain di whitelist (menunggu log server...):"
+         lastLogMatch "$server_path" "whitelisted players:" | sed 's/.*: //; s/, /\n/g'
+         pause
+         ;;
+      4) read -rp "Tambah pemain: " target; [ -z "$target" ] && continue
+         consoleCmd "$server_name" "whitelist add $target" && echo -e "${GREEN}Perintah untuk menambahkan ${target} telah dikirim.${NC}"; pause ;;
+      5) read -rp "Hapus pemain: " target; [ -z "$target" ] && continue
+         consoleCmd "$server_name" "whitelist remove $target" && echo -e "${GREEN}Perintah untuk menghapus ${target} telah dikirim.${NC}"; pause ;;
+      6) consoleCmd "$server_name" "whitelist reload" && echo -e "${GREEN}Perintah untuk me-reload whitelist telah dikirim.${NC}"; pause ;;
+      0) return ;;
+      *) echo -e "${RED}Pilihan tidak valid.${NC}"; sleep 1 ;;
+    esac
+  done
 }
 
 serverActionMenu(){
@@ -379,7 +827,7 @@ serverActionMenu(){
     echo " 5. Kelola Pemain"
     echo " 6. Editor Konfigurasi"
     echo " 7. File Manager (mc)"
-    echo " 8. System Configuration (RAM/JVM)"
+    echo " 8. System Configuration"
     echo " 9. Manajemen Whitelist"
     echo "10. Set Auto Restart"
     echo "11. Website Upload Plugin"
@@ -437,9 +885,9 @@ serverActionMenu(){
       5) playersMenu "$server_name" ;;
       6) configEditorMenu "$server_name" ;;
       7) 
-         if need_cmd mc; then mc "$server_path"; else echo "${RED}Install 'mc' dulu.${NC}"; pause; fi ;;
-      8) systemConfigurationMenu "$server_name" ;; # Pastikan fungsi ini ada/diload
-      9) whitelistMenu "$server_name" ;; # Pastikan fungsi ini ada/diload
+         if need_cmd mc; then mc "$server_path"; else echo -e "${RED}Install 'mc' dulu.${NC}"; pause; fi ;;
+      8) systemConfigurationMenu "$server_name" ;; 
+      9) whitelistMenu "$server_name" ;; 
       10) autoRestartMenu "$server_name" ;;
       11) pluginWebMenu "$server_name" ;;
       12) 
