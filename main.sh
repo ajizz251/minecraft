@@ -2,14 +2,19 @@
 set -euo pipefail
 
 # ==============================================================================
-#   PANEL SERVER MINECRAFT (BASH) - Versi Final
+#   PANEL SERVER MINECRAFT (BASH) - Versi Non-Root
 # ==============================================================================
 
-# --- Konfigurasi Path Utama ---
+# --- Konfigurasi Path Utama (Dinamis & Exported) ---
+# Menggunakan direktori tempat script ini berada sebagai basis
 BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SERVERS_DIR="${SERVERS_DIR:-$BASE_DIR/servers}"
-FUNCTIONS_DIR="${FUNCTIONS_DIR:-$BASE_DIR/functions}"
-EGGS_DIR="${EGGS_DIR:-$BASE_DIR/eggs}"
+
+# Export variabel agar bisa dibaca oleh script/fungsi external (seperti bot_listener atau install script)
+export BASE_DIR
+export PANEL_DIR="$BASE_DIR"  # Alias untuk kompatibilitas dengan script lama
+export SERVERS_DIR="${SERVERS_DIR:-$BASE_DIR/servers}"
+export FUNCTIONS_DIR="${FUNCTIONS_DIR:-$BASE_DIR/functions}"
+export EGGS_DIR="${EGGS_DIR:-$BASE_DIR/eggs}"
 
 # --- Definisi Warna ---
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m';
@@ -55,7 +60,8 @@ print_header(){
   local RAM CPU DSK CNT BOT
   RAM=$(free -m | awk '/^Mem:/ {printf "%s/%s MiB (%s%%)", $3, $2, int($3/$2*100)}')
   CPU=$(awk '{printf "%.2f %.2f %.2f", $1, $2, $3}' /proc/loadavg)
-  DSK=$(df -hP / | awk 'NR==2{printf "%s/%s (%s)", $3, $2, $5}')
+  # Disk usage pada partisi root, mungkin perlu disesuaikan jika home ada di partisi lain
+  DSK=$(df -hP "$BASE_DIR" | awk 'NR==2{printf "%s/%s (%s)", $3, $2, $5}')
   CNT=$(find "$SERVERS_DIR" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l)
 
   if need_cmd tmux && tmux has-session -t "BotListener" 2>/dev/null; then
@@ -69,7 +75,7 @@ print_header(){
   echo -e "${BLUE}╠══════════════════════════════════════════════════════════════╣${NC}"
   printf "${BLUE}║${NC} ${CYAN}%-10s${NC} : ${MAG}%-45s${NC}   ${BLUE}║${NC}\n" "RAM" "$RAM"  
   printf "${BLUE}║${NC} ${CYAN}%-10s${NC} : ${MAG}%-45s${NC}   ${BLUE}║${NC}\n" "CPU Load" "$CPU"  
-  printf "${BLUE}║${NC} ${CYAN}%-10s${NC} : ${MAG}%-45s${NC}   ${BLUE}║${NC}\n" "Disk (/)" "$DSK"  
+  printf "${BLUE}║${NC} ${CYAN}%-10s${NC} : ${MAG}%-45s${NC}   ${BLUE}║${NC}\n" "Disk" "$DSK"  
   printf "${BLUE}║${NC} ${CYAN}%-10s${NC} : ${MAG}%-18s${NC}    ${CYAN}%-13s${NC} : %-9b ${BLUE}║${NC}\n" "Server" "$CNT Terpasang" "Bot Listener" "$BOT"
   echo -e "${BLUE}╚══════════════════════════════════════════════════════════════╝${NC}"
 }
@@ -88,8 +94,12 @@ do_monitor(){
   if ! need_cmd btop; then
     read -p "Perintah 'btop' tidak ditemukan. Coba install sekarang? (y/n): " confirm
     if [[ "$confirm" == "y" ]]; then
-      echo "Menginstal btop..."
-      sudo apt-get update && sudo apt-get install -y btop
+      echo "Menginstal btop (membutuhkan sudo)..."
+      if [ "$EUID" -ne 0 ]; then
+         sudo apt-get update && sudo apt-get install -y btop
+      else
+         apt-get update && apt-get install -y btop
+      fi
     else
       return
     fi
