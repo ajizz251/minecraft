@@ -3,7 +3,15 @@
 set -euo pipefail
 
 # ============================ KONFIG =============================
-PANEL_DIR="${PANEL_DIR:-/root/mc-panel}"
+# Deteksi apakah butuh sudo
+if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
+    SUDO="sudo"
+else
+    SUDO=""
+fi
+
+# Ubah direktori panel ke Home User, bukan /root
+PANEL_DIR="${PANEL_DIR:-$HOME/mc-panel}"
 REPO_URL="${REPO_URL:-https://github.com/azziz1601/minecraft.git}"
 REPO_BRANCH="${REPO_BRANCH:-main}"
 TMP_CLONE_DIR="/tmp/mc-panel-repo.$$"
@@ -23,13 +31,16 @@ GOTOP_WRAPPER="/usr/local/bin/gotop"
 # Profile script untuk alias & autostart panel
 PANEL_PROFILE_SNIPPET="/etc/profile.d/mc-panel.sh"
 
-# Log file
-LOG_FILE="/var/log/mc-panel-setup.log"
-mkdir -p "$(dirname "$LOG_FILE")"
-: > "$LOG_FILE"
+# Log file (Simpan di folder panel agar tidak butuh izin root ke /var/log)
+LOG_FILE="$PANEL_DIR/logs/setup.log"
 
 # ============================ UTIL ===============================
 trap 'tput cnorm 2>/dev/null || true' EXIT
+
+# Pastikan folder log ada (bisa dibuat tanpa root karena di $HOME)
+mkdir -p "$(dirname "$LOG_FILE")"
+: > "$LOG_FILE"
+
 log()  { echo "[SETUP] $*" >>"$LOG_FILE"; }
 ok()   { printf "\r\033[1;32m[ OK ]\033[0m %s\n" "$1"; }
 errm() { printf "\r\033[1;31m[ERR ]\033[0m %s\n" "$1"; }
@@ -58,10 +69,16 @@ spinner_run() {
   tput cnorm 2>/dev/null || true
 }
 
-require_root() {
-  if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
-    errm "Jalankan sebagai root (sudo -i)."
-    exit 1
+# Fungsi require_root DIHAPUS, diganti check_sudo
+check_sudo() {
+  if [[ -z "$SUDO" ]]; then
+     return 0
+  fi
+  # Cek apakah user punya akses sudo
+  if ! sudo -n true 2>/dev/null; then
+     # Jika butuh password, prompt di awal
+     echo "Script ini membutuhkan akses sudo untuk menginstal paket sistem."
+     sudo -v || exit 1
   fi
 }
 
@@ -78,32 +95,36 @@ detect_os() {
 }
 
 apt_update() {
-  spinner_run "Memperbarui indeks paket" bash -c "apt-get update -y"
+  spinner_run "Memperbarui indeks paket" bash -c "$SUDO apt-get update -y"
 }
 
 install_pkgs_base() {
-  spinner_run "Menginstal paket dasar & dependensi" bash -c "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ${PKGS_BASE[*]}"
+  spinner_run "Menginstal paket dasar & dependensi" bash -c "DEBIAN_FRONTEND=noninteractive $SUDO apt-get install -y --no-install-recommends ${PKGS_BASE[*]}"
 }
 
 install_java_smart() {
+  # Instalasi Java butuh akses root ke /opt dan /usr/local/bin
   if [[ "${OS_ID:-}" == "debian" ]]; then
     spinner_run "Mengunduh JDK 21 (.deb) untuk Debian" bash -c "curl -fsSL -o /tmp/jdk21.deb '$ORACLE_DEBIAN_DEB_URL'"
-    spinner_run "Memasang JDK 21 (.deb) Oracle" bash -c "apt-get install -y /tmp/jdk21.deb && rm -f /tmp/jdk21.deb"
+    spinner_run "Memasang JDK 21 (.deb) Oracle" bash -c "$SUDO apt-get install -y /tmp/jdk21.deb && rm -f /tmp/jdk21.deb"
   else
     case "$ARCH" in
       x86_64|amd64)
         spinner_run "Mengunduh JDK 21 (.deb) untuk Ubuntu (amd64)" bash -c "curl -fsSL -o /tmp/jdk21.deb '$ORACLE_DEBIAN_DEB_URL'"
-        spinner_run "Memasang JDK 21 (.deb) Oracle" bash -c "apt-get install -y /tmp/jdk21.deb && rm -f /tmp/jdk21.deb"
+        spinner_run "Memasang JDK 21 (.deb) Oracle" bash -c "$SUDO apt-get install -y /tmp/jdk21.deb && rm -f /tmp/jdk21.deb"
         ;;
       aarch64|arm64)
         spinner_run "Mengunduh JDK 21 (tar.gz) aarch64" bash -c "curl -fsSL -o /tmp/jdk21.tar.gz '$ORACLE_TARGZ_AARCH64_URL'"
-        spinner_run "Ekstrak JDK 21 ke $JAVA_INSTALL_DIR" bash -c "mkdir -p '$JAVA_INSTALL_DIR' && tar -xzf /tmp/jdk21.tar.gz -C '$JAVA_INSTALL_DIR' && rm -f /tmp/jdk21.tar.gz"
+        spinner_run "Ekstrak JDK 21 ke $JAVA_INSTALL_DIR" bash -c "$SUDO mkdir -p '$JAVA_INSTALL_DIR' && $SUDO tar -xzf /tmp/jdk21.tar.gz -C '$JAVA_INSTALL_DIR' && rm -f /tmp/jdk21.tar.gz"
         local jdk_dir
         jdk_dir="$(find "$JAVA_INSTALL_DIR" -maxdepth 1 -type d -name 'jdk-21*' | head -n1 || true)"
         [[ -z "$jdk_dir" ]] && { errm "Gagal menemukan folder hasil ekstrak JDK."; exit 1; }
+        
+        # Tulis profile snippet dengan sudo
         echo "export JAVA_HOME=\"$jdk_dir\"
-export PATH=\"\$JAVA_HOME/bin:\$PATH\"" > "$PROFILE_SNIPPET"
-        spinner_run "Menyetel JAVA_HOME & symlink biner" bash -c "mkdir -p /usr/local/bin && ln -sf '$jdk_dir/bin/java' /usr/local/bin/java && ln -sf '$jdk_dir/bin/javac' /usr/local/bin/javac"
+export PATH=\"\$JAVA_HOME/bin:\$PATH\"" | $SUDO tee "$PROFILE_SNIPPET" >/dev/null
+
+        spinner_run "Menyetel JAVA_HOME & symlink biner" bash -c "$SUDO mkdir -p /usr/local/bin && $SUDO ln -sf '$jdk_dir/bin/java' /usr/local/bin/java && $SUDO ln -sf '$jdk_dir/bin/javac' /usr/local/bin/javac"
         # shellcheck disable=SC1090
         source "$PROFILE_SNIPPET" 2>>"$LOG_FILE" || true
         ;;
@@ -121,37 +142,38 @@ verify_java() {
 
 install_gotop_smart() {
   # Pakai SNAP sesuai permintaan
-  spinner_run "Menginstal snapd" bash -c "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends snapd"
-  spinner_run "Mengaktifkan snapd" bash -c "systemctl enable --now snapd.socket && systemctl start snapd.socket || true"
+  spinner_run "Menginstal snapd" bash -c "DEBIAN_FRONTEND=noninteractive $SUDO apt-get install -y --no-install-recommends snapd"
+  spinner_run "Mengaktifkan snapd" bash -c "$SUDO systemctl enable --now snapd.socket && $SUDO systemctl start snapd.socket || true"
   # Tunggu socket siap sebentar
   spinner_run "Menyiapkan lingkungan snap" bash -c "sleep 2"
-  if ( spinner_run "Menginstal gotop (snap)" bash -c "snap install gotop" ); then
+  if ( spinner_run "Menginstal gotop (snap)" bash -c "$SUDO snap install gotop" ); then
     return 0
   fi
   # Fallback: btop + wrapper 'gotop'
   warn "Install gotop via snap gagal. Menggunakan btop sebagai fallback."
-  spinner_run "Menginstal btop (fallback)" bash -c "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends btop || true"
+  spinner_run "Menginstal btop (fallback)" bash -c "DEBIAN_FRONTEND=noninteractive $SUDO apt-get install -y --no-install-recommends btop || true"
   if ! need btop; then
     warn "btop tidak tersedia. Menu monitor akan terbatas."
     return 0
   fi
+  
+  # Membuat wrapper gotop -> btop (butuh sudo)
   spinner_run "Membuat wrapper gotop -> btop" bash -c "
-cat > '$GOTOP_WRAPPER' <<'WRAP'
-#!/usr/bin/env bash
-exec btop \"\$@\"
-WRAP
-chmod +x '$GOTOP_WRAPPER'
+echo '#!/usr/bin/env bash
+exec btop \"\$@\"' | $SUDO tee '$GOTOP_WRAPPER' >/dev/null
+$SUDO chmod +x '$GOTOP_WRAPPER'
 "
 }
 
 enable_services() {
-  spinner_run "Mengaktifkan layanan vnstat" bash -c "systemctl enable --now vnstat"
-  spinner_run "Mengaktifkan layanan cron"   bash -c "systemctl enable --now cron"
+  spinner_run "Mengaktifkan layanan vnstat" bash -c "$SUDO systemctl enable --now vnstat"
+  spinner_run "Mengaktifkan layanan cron"   bash -c "$SUDO systemctl enable --now cron"
 }
 
 prepare_panel_dir() {
+  # Tidak butuh sudo jika PANEL_DIR ada di home user
   spinner_run "Menyusun direktori panel ($PANEL_DIR)" bash -c "
-    mkdir -p '$PANEL_DIR'/servers '$PANEL_DIR'/functions '$PANEL_DIR'/eggs
+    mkdir -p '$PANEL_DIR'/servers '$PANEL_DIR'/functions '$PANEL_DIR'/eggs '$PANEL_DIR'/logs
   "
 }
 
@@ -170,22 +192,31 @@ deploy_repo() {
   spinner_run "Mengatur izin eksekusi skrip" bash -c "
     chmod +x '$PANEL_DIR'/*.sh 2>/dev/null || true
     chmod +x '$PANEL_DIR'/functions/*.sh 2>/dev/null || true
-    dos2unix /root/mc-panel/functions/plugin_web.sh
-    dos2unix /root/mc-panel/functions/plugin_web.py
+    dos2unix '$PANEL_DIR'/functions/plugin_web.sh 2>/dev/null || true
+    dos2unix '$PANEL_DIR'/functions/plugin_web.py 2>/dev/null || true
   "
   spinner_run "Membersihkan berkas sementara" bash -c "rm -rf '$TMP_CLONE_DIR'"
 }
 
 install_alias_and_autostart() {
+  # Menambahkan alias ke .bashrc user (agar tidak perlu logout/login shell baru untuk efek sudo profile)
+  if ! grep -q "alias menu=" "$HOME/.bashrc"; then
+      echo "
+# mc-panel alias
+alias menu='cd \"$PANEL_DIR\" && ./main.sh'
+" >> "$HOME/.bashrc"
+  fi
+
+  # Menulis ke /etc/profile.d (tetap dilakukan agar kompatibel, tapi butuh sudo)
   spinner_run "Menyiapkan alias 'menu' & autostart panel" bash -c "
-cat > '$PANEL_PROFILE_SNIPPET' <<'EOF'
+cat <<EOF | $SUDO tee '$PANEL_PROFILE_SNIPPET' >/dev/null
 # mc-panel profile
 export MCPANEL_DIR=\"$PANEL_DIR\"
 alias menu='cd \"$PANEL_DIR\" && ./main.sh'
 
-# Auto start panel saat login interaktif oleh root (bisa dimatikan dengan: export MCPANEL_AUTOSTART=0)
+# Auto start panel saat login interaktif oleh USER PEMILIK ($USER)
 if [ -z \"\$MCPANEL_AUTOSTART\" ] || [ \"\$MCPANEL_AUTOSTART\" = \"1\" ]; then
-  if [ \"\$USER\" = \"root\" ] && [ -t 0 ] && [ -t 1 ]; then
+  if [ \"\$USER\" = \"$USER\" ] && [ -t 0 ] && [ -t 1 ]; then
     case \"\$-\" in
       *i*)
         if [ -x \"\$MCPANEL_DIR/main.sh\" ] && [ -z \"\$MCPANEL_INVOKED\" ]; then
@@ -199,7 +230,7 @@ if [ -z \"\$MCPANEL_AUTOSTART\" ] || [ \"\$MCPANEL_AUTOSTART\" = \"1\" ]; then
   fi
 fi
 EOF
-chmod 0644 '$PANEL_PROFILE_SNIPPET'
+$SUDO chmod 0644 '$PANEL_PROFILE_SNIPPET'
 "
 }
 
@@ -210,9 +241,10 @@ post_info() {
   printf "\033[1;34m═══════════════════════════════════════════════════════\033[0m\n"
   echo "• Panel   : $PANEL_DIR"
   echo "• Log     : $LOG_FILE"
+  echo "• User    : $USER (Non-Root)"
   echo "• Java    : $(java -version 2>&1 | sed -n '1p')"
   echo "• Alias   : ketik \`menu\` untuk membuka panel"
-  echo "• AutoRun : panel akan otomatis terbuka saat login."
+  echo "• AutoRun : panel akan otomatis terbuka saat login user '$USER'."
   echo
   echo -e "Jalankan panel sekarang:"
   echo -e "  \033[1;33mcd $PANEL_DIR && ./main.sh\033[0m"
@@ -221,8 +253,12 @@ post_info() {
 }
 
 write_systemd_unit() {
-  log "Menulis /etc/systemd/system/minecraft@.service"
-  cat > /etc/systemd/system/minecraft@.service <<'UNIT'
+  log "Menulis /etc/systemd/system/minecraft@.service dengan User=$USER"
+  
+  # Perhatikan: User=... diisi dengan user saat ini ($USER)
+  # Environment PANEL_DIR diupdate ke direktori home user
+  
+  cat <<UNIT | $SUDO tee /etc/systemd/system/minecraft@.service >/dev/null
 # /etc/systemd/system/minecraft@.service
 [Unit]
 Description=Minecraft Server (%i) via tmux
@@ -234,41 +270,41 @@ Type=forking
 GuessMainPID=no
 RemainAfterExit=yes
 
-# -- SESUAIKAN JIKA PERLU --
-User=root
-Environment=PANEL_DIR=/root/mc-panel
+# -- KONFIGURASI NON-ROOT --
+User=$USER
+Environment=PANEL_DIR=$PANEL_DIR
 Environment=SESSION=%i
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
 # ---------------------------
 
-WorkingDirectory=/
+WorkingDirectory=$PANEL_DIR
 
 ExecStartPre=/usr/bin/test -x /usr/bin/tmux
-ExecStartPre=/usr/bin/test -d ${PANEL_DIR}/servers/%i
-ExecStartPre=/usr/bin/test -x ${PANEL_DIR}/servers/%i/start.sh
+ExecStartPre=/usr/bin/test -d \${PANEL_DIR}/servers/%i
+ExecStartPre=/usr/bin/test -x \${PANEL_DIR}/servers/%i/start.sh
 
 ExecStart=/bin/bash -lc '\
-  if ! tmux has-session -t "$SESSION" 2>/dev/null; then \
-    tmux new-session -d -s "$SESSION" "cd \"${PANEL_DIR}/servers/${SESSION}\" && ./start.sh"; \
+  if ! tmux has-session -t "\$SESSION" 2>/dev/null; then \
+    tmux new-session -d -s "\$SESSION" "cd \"\${PANEL_DIR}/servers/\${SESSION}\" && ./start.sh"; \
   fi \
 '
 
 ExecStartPost=/bin/bash -lc '\
   for i in {1..15}; do \
-    tmux has-session -t "$SESSION" 2>/dev/null && exit 0; \
+    tmux has-session -t "\$SESSION" 2>/dev/null && exit 0; \
     sleep 1; \
   done; \
-  echo "ERROR: tmux session $SESSION tidak ditemukan (start.sh mungkin error)"; \
+  echo "ERROR: tmux session \$SESSION tidak ditemukan (start.sh mungkin error)"; \
   exit 1 \
 '
 
 ExecStop=/bin/bash -lc '\
-  if tmux has-session -t "$SESSION" 2>/dev/null; then \
-    tmux send-keys -t "$SESSION" "say [Panel] Server stopping in 5s..." C-m; \
+  if tmux has-session -t "\$SESSION" 2>/dev/null; then \
+    tmux send-keys -t "\$SESSION" "say [Panel] Server stopping in 5s..." C-m; \
     sleep 5; \
-    tmux send-keys -t "$SESSION" "stop" C-m; \
-    for i in {1..60}; do tmux has-session -t "$SESSION" 2>/dev/null || break; sleep 1; done; \
-    tmux has-session -t "$SESSION" 2>/dev/null && tmux kill-session -t "$SESSION"; \
+    tmux send-keys -t "\$SESSION" "stop" C-m; \
+    for i in {1..60}; do tmux has-session -t "\$SESSION" 2>/dev/null || break; sleep 1; done; \
+    tmux has-session -t "\$SESSION" 2>/dev/null && tmux kill-session -t "\$SESSION"; \
   fi; \
   true \
 '
@@ -282,12 +318,12 @@ TimeoutStopSec=90
 WantedBy=multi-user.target
 UNIT
 
-  chmod 0644 /etc/systemd/system/minecraft@.service
-  systemctl daemon-reload
+  $SUDO chmod 0644 /etc/systemd/system/minecraft@.service
+  $SUDO systemctl daemon-reload
 }
 
 # ============================ MAIN ================================
-require_root
+check_sudo
 detect_os
 apt_update
 install_pkgs_base
@@ -301,8 +337,3 @@ deploy_repo
 install_alias_and_autostart
 write_systemd_unit
 post_info
-
-
-
-
-
