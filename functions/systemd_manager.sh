@@ -2,14 +2,18 @@
 set -euo pipefail
 
 # ==== Konfigurasi dasar ====
-PANEL_DIR="${PANEL_DIR:-/root/mc-panel}"
+# Deteksi path dinamis berdasarkan lokasi script ini
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BASE_DIR="$(cd "$SELF_DIR/.." && pwd)"
+PANEL_DIR="${PANEL_DIR:-$BASE_DIR}"
 
 unit_template_path="/etc/systemd/system/minecraft@.service"
 
 ensureSystemdTemplate() {
   if [ ! -f "$unit_template_path" ]; then
     echo -e "\n[ERR] Unit template $unit_template_path belum ada."
-    echo "Salin file template ke $unit_template_path lalu jalankan: systemctl daemon-reload"
+    echo "Pastikan Anda sudah menjalankan setup.sh dengan sukses."
+    echo "Atau salin manual template ke $unit_template_path."
     read -rp "Tekan [Enter] untuk kembali..."
     return 1
   fi
@@ -25,13 +29,17 @@ sysd_name() {  # nama service untuk server tertentu
 enableAutostart() {  # enable + start via systemd
   local server="$1"
   ensureSystemdTemplate || return
+  
+  # Cek file start.sh relatif terhadap PANEL_DIR (bukan path hardcoded)
   if [ ! -x "$PANEL_DIR/servers/$server/start.sh" ]; then
     echo "[ERR] $PANEL_DIR/servers/$server/start.sh tidak ditemukan atau tidak executable."
     read -rp "Tekan [Enter]..." ; return
   fi
-  systemctl daemon-reload
-  systemctl enable "$(sysd_name "$server")"
-  systemctl start  "$(sysd_name "$server")"
+
+  echo "Membutuhkan akses sudo untuk mengatur systemd..."
+  sudo systemctl daemon-reload
+  sudo systemctl enable "$(sysd_name "$server")"
+  sudo systemctl start  "$(sysd_name "$server")"
   echo "✅ Autostart ENABLED & server dijalankan via systemd."
   read -rp "Tekan [Enter]..."
 }
@@ -39,8 +47,10 @@ enableAutostart() {  # enable + start via systemd
 disableAutostart() { # disable + stop via systemd
   local server="$1"
   ensureSystemdTemplate || return
-  systemctl disable "$(sysd_name "$server")" || true
-  systemctl stop    "$(sysd_name "$server")" || true
+  
+  echo "Membutuhkan akses sudo..."
+  sudo systemctl disable "$(sysd_name "$server")" || true
+  sudo systemctl stop    "$(sysd_name "$server")" || true
   echo "🛑 Autostart DISABLED & server dihentikan (jika jalan)."
   read -rp "Tekan [Enter]..."
 }
@@ -49,7 +59,8 @@ statusAutostart() {
   local server="$1"
   ensureSystemdTemplate || return
   echo "=== systemctl status $(sysd_name "$server") ==="
-  systemctl status "$(sysd_name "$server")" --no-pager || true
+  # Coba tanpa sudo dulu (biasanya bisa baca status), jika gagal baru minta sudo
+  systemctl status "$(sysd_name "$server")" --no-pager || sudo systemctl status "$(sysd_name "$server")" --no-pager || true
   echo
   echo "=== tmux sessions ==="
   tmux ls 2>/dev/null || echo "(no tmux session)"
@@ -60,7 +71,8 @@ statusAutostart() {
 restartService() {
   local server="$1"
   ensureSystemdTemplate || return
-  systemctl restart "$(sysd_name "$server")"
+  echo "Membutuhkan akses sudo..."
+  sudo systemctl restart "$(sysd_name "$server")"
   echo "🔁 Server di-restart via systemd."
   read -rp "Tekan [Enter]..."
 }
@@ -71,6 +83,8 @@ systemdMenu() {
   while true; do
     clear
     echo "=== Systemd Autostart untuk server: $server_name ==="
+    echo "Note: Fitur ini membutuhkan password sudo/root user Anda."
+    echo "--------------------------------------------------------"
     echo "1) Enable & Start"
     echo "2) Disable & Stop"
     echo "3) Status"
