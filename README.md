@@ -51,7 +51,7 @@ Kami Merekomendasikan Debian 12 Jika Memerlukan Stabilitas Tinggi Dan Uptime Pan
 ## ⚡ Instalasi Otomatis
 Jalankan perintah berikut di VPS Anda:
 
-<pre><code>apt-get update && apt-get upgrade && apt install -y dos2unix && wget -O setup.sh https://raw.githubusercontent.com/azziz1601/minecraft/main/setup.sh && dos2unix setup.sh && chmod +x setup.sh && ./setup.sh</pre></code>
+<pre><code>apt-get update && apt-get upgrade && apt install -y dos2unix && wget -O setup.sh https://raw.githubusercontent.com/ajizz251/minecraft/main/setup.sh && dos2unix setup.sh && chmod +x setup.sh && ./setup.sh</pre></code>
 
 # 📌 Script akan otomatis:
 
